@@ -1,0 +1,125 @@
+import os
+import time
+import musicbrainzngs
+from mutagen.id3 import ID3, TDRC
+from mutagen.mp3 import MP3
+
+musicbrainzngs.set_useragent("MP3YearFixer", "1.0", "your@email.com")
+
+FOLDER = r"D:\music"
+LOG_FILE = r"D:\music\fix_years_log.txt"
+
+def get_year_from_mb(artist, title, album):
+    try:
+        result = musicbrainzngs.search_recordings(
+            recording=title,
+            artist=artist,
+            release=album,
+            limit=10
+        )
+        recordings = result.get("recording-list", [])
+
+        best_year = None
+
+        for rec in recordings:
+            # Try to get the original first-release date from the recording itself
+            first_release = rec.get("first-release-date", "")
+            if first_release and len(first_release) >= 4:
+                year = first_release[:4]
+                if year.isdigit() and 1900 <= int(year) <= 2100:
+                    if best_year is None or int(year) < int(best_year):
+                        best_year = year
+                        continue
+
+            # Fall back to checking individual releases, filter by album name
+            releases = rec.get("release-list", [])
+            for release in releases:
+                rel_title = release.get("title", "").lower()
+                if album.lower() not in rel_title and rel_title not in album.lower():
+                    continue
+                date = release.get("date", "")
+                if date and len(date) >= 4:
+                    year = date[:4]
+                    if year.isdigit() and 1900 <= int(year) <= 2100:
+                        if best_year is None or int(year) < int(best_year):
+                            best_year = year
+
+        return best_year
+
+    except Exception as e:
+        return None
+
+def fix_mp3_year(filepath):
+    try:
+        audio = MP3(filepath, ID3=ID3)
+        tags = audio.tags
+        if tags is None:
+            return "NO_TAGS"
+
+        artist = str(tags.get("TPE1", "")).strip()
+        title  = str(tags.get("TIT2", "")).strip()
+        album  = str(tags.get("TALB", "")).strip()
+
+        if not artist or not title:
+            return "MISSING_ARTIST_OR_TITLE"
+        if not album:
+            return "MISSING_ALBUM"
+
+        year = get_year_from_mb(artist, title, album)
+        if not year:
+            return "NOT_FOUND"
+
+        tags.add(TDRC(encoding=3, text=year))
+        tags.save(filepath)
+        return f"OK:{year}"
+
+    except Exception as e:
+        return f"ERROR:{e}"
+
+def main():
+    mp3_files = [
+        os.path.join(FOLDER, f)
+        for f in os.listdir(FOLDER)
+        if f.lower().endswith(".mp3")
+    ]
+
+    total = len(mp3_files)
+    print(f"Found {total} MP3 files in {FOLDER}\n")
+
+    results = {"ok": 0, "not_found": 0, "error": 0}
+
+    with open(LOG_FILE, "w", encoding="utf-8") as log:
+        log.write(f"MP3 Year Fix Log — {total} files\n{'='*50}\n\n")
+
+        for i, filepath in enumerate(mp3_files, 1):
+            filename = os.path.basename(filepath)
+            status = fix_mp3_year(filepath)
+
+            if status.startswith("OK:"):
+                year = status.split(":")[1]
+                msg = f"[{i}/{total}] OK  {filename}  ->  {year}"
+                results["ok"] += 1
+            elif status == "NOT_FOUND":
+                msg = f"[{i}/{total}] ?   {filename}  ->  not found on MusicBrainz"
+                results["not_found"] += 1
+            else:
+                msg = f"[{i}/{total}] ERR {filename}  ->  {status}"
+                results["error"] += 1
+
+            print(msg)
+            log.write(msg + "\n")
+
+            time.sleep(1.1)
+
+    summary = (
+        f"\nDone. {results['ok']} updated, "
+        f"{results['not_found']} not found, "
+        f"{results['error']} errors.\n"
+        f"Full log saved to: {LOG_FILE}"
+    )
+    print(summary)
+    with open(LOG_FILE, "a", encoding="utf-8") as log:
+        log.write(summary + "\n")
+
+if __name__ == "__main__":
+    main()
